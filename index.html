@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#1f3a5f">
 <title>Competency for High Intensity Support Activity</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
 <style>
   * { box-sizing: border-box; }
   body {
@@ -648,6 +649,8 @@
   <button class="btn btn-ghost" onclick="resetForm()">Reset</button>
   <button class="btn" onclick="printSelected()">Print Selected</button>
   <button class="btn btn-primary" onclick="printAll()">Print All</button>
+  <button class="btn" onclick="downloadPDF()" title="Save the completed form as a PDF file">⬇ Download PDF</button>
+  <button class="btn" onclick="emailForm()" title="Open your email app with form summary">✉ Email Form</button>
 </div>
 
 <main>
@@ -889,6 +892,235 @@
     if (!confirm('Clear all entered data?')) return;
     document.querySelectorAll('input[type="text"], input[type="date"], textarea').forEach(el => el.value = '');
     document.querySelectorAll('select').forEach(el => el.selectedIndex = 0);
+  }
+
+  // ===== Helpers used by Download PDF + Email =====
+  // Pull the staff name from the first text input that looks like a "name" field, else fallback.
+  function getStaffName() {
+    const candidates = document.querySelectorAll('input[type="text"]');
+    for (const el of candidates) {
+      const v = (el.value || '').trim();
+      if (!v) continue;
+      const ph = (el.placeholder || '').toLowerCase();
+      const nm = (el.name || '').toLowerCase();
+      const id = (el.id || '').toLowerCase();
+      if (ph.includes('name') || nm.includes('name') || id.includes('name') ||
+          ph.includes('staff') || ph.includes('participant')) {
+        return v.replace(/[^A-Za-z0-9가-힣 _-]/g, '').replace(/\s+/g, '_');
+      }
+    }
+    // Fallback: first non-empty text input
+    for (const el of candidates) {
+      const v = (el.value || '').trim();
+      if (v) return v.replace(/[^A-Za-z0-9가-힣 _-]/g, '').replace(/\s+/g, '_');
+    }
+    return 'Unnamed';
+  }
+
+  function todayISO() {
+    const d = new Date();
+    const pad = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+  }
+
+  // Persist current values into the DOM so html2pdf captures them
+  // (input elements only render typed values when their value attribute is set on clone)
+  function snapshotInputs(rootEl) {
+    rootEl.querySelectorAll('input').forEach(el => {
+      if (el.type === 'checkbox' || el.type === 'radio') {
+        if (el.checked) el.setAttribute('checked', 'checked');
+        else el.removeAttribute('checked');
+      } else {
+        el.setAttribute('value', el.value || '');
+      }
+    });
+    rootEl.querySelectorAll('textarea').forEach(el => {
+      el.textContent = el.value || '';
+    });
+    rootEl.querySelectorAll('select').forEach(sel => {
+      Array.from(sel.options).forEach(opt => {
+        if (opt.selected) opt.setAttribute('selected', 'selected');
+        else opt.removeAttribute('selected');
+      });
+    });
+  }
+
+  // ===== ① Download PDF =====
+  // Inject print-equivalent CSS into the PDF render wrapper so the One Dream
+  // Community logo banner shows up on every section, just like printing does.
+  function injectPdfStyles() {
+    if (document.getElementById('pdf-mode-styles')) return;
+    const css = `
+      .pdf-mode { background: #fff; color: #000; font-family: inherit; }
+      .pdf-mode .no-print { display: none !important; }
+      .pdf-mode .print-header { display: none !important; }
+      /* Make the per-section logo banner visible — same look as print */
+      .pdf-mode .section-print-banner {
+        display: flex !important;
+        align-items: center;
+        gap: 14px;
+        padding: 10px 14px;
+        background: #f5f7fb;
+        border-bottom: 3px solid #1f3a5f;
+        margin: 0 0 14px;
+        page-break-after: avoid;
+        break-after: avoid;
+      }
+      .pdf-mode .section-print-banner img {
+        height: 44px; width: auto; display: block;
+      }
+      .pdf-mode .section-print-banner .spb-title {
+        font-size: 15px; font-weight: 700; color: #1f3a5f; line-height: 1.2;
+      }
+      .pdf-mode .section-print-banner .spb-sub {
+        font-size: 11px; color: #4a5568; margin-top: 2px;
+      }
+      /* Keep section header & content together */
+      .pdf-mode .competency-section {
+        page-break-before: always;
+        break-before: page;
+      }
+      .pdf-mode .competency-section:first-of-type {
+        page-break-before: avoid;
+        break-before: avoid;
+      }
+      .pdf-mode .competency-section,
+      .pdf-mode .section-header,
+      .pdf-mode .section-info-bar,
+      .pdf-mode table,
+      .pdf-mode tr {
+        page-break-inside: avoid;
+        break-inside: avoid;
+      }
+      /* Force background colors to render */
+      .pdf-mode *, .pdf-mode *::before, .pdf-mode *::after {
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
+      }
+      /* Empty inputs keep their underline so the form looks like a form */
+      .pdf-mode input[type="text"], .pdf-mode input[type="date"], .pdf-mode textarea {
+        background: transparent !important; color: #000 !important;
+      }
+      /* Cover page footer */
+      .pdf-cover {
+        text-align: center; padding: 30px 20px 14px;
+        border-bottom: 3px solid #1f3a5f; margin-bottom: 18px;
+      }
+      .pdf-cover img { height: 80px; width: auto; }
+      .pdf-cover h1 {
+        margin: 14px 0 4px; color: #1f3a5f;
+        font-size: 22px; letter-spacing: 0.02em;
+      }
+      .pdf-cover .meta { color: #4a5568; font-size: 13px; }
+      .pdf-cover .meta strong { color: #1f3a5f; }
+    `;
+    const style = document.createElement('style');
+    style.id = 'pdf-mode-styles';
+    style.textContent = css;
+    document.head.appendChild(style);
+  }
+
+  async function downloadPDF() {
+    if (typeof html2pdf === 'undefined') {
+      alert('PDF library failed to load. Please check your internet connection and try again.');
+      return;
+    }
+    const btn = event && event.currentTarget;
+    const oldLabel = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = 'Generating PDF…'; }
+
+    try {
+      injectPdfStyles();
+
+      // Build a clean clone of <main>
+      const clone = document.querySelector('main').cloneNode(true);
+      clone.querySelectorAll('.no-print').forEach(n => n.remove());
+      clone.querySelectorAll('.competency-section.hidden').forEach(n => n.remove());
+      snapshotInputs(clone);
+
+      // PDF wrapper (page-width like print) with cover page that includes the logo
+      const wrapper = document.createElement('div');
+      wrapper.className = 'pdf-mode';
+      wrapper.style.cssText = 'width:210mm;padding:0;margin:0;background:#fff;';
+
+      // Cover header — big logo + form title
+      const cover = document.createElement('div');
+      cover.className = 'pdf-cover';
+      const staff = getStaffName();
+      const date = todayISO();
+      cover.innerHTML = `
+        <img src="${LOGO_URL}" alt="One Dream Community">
+        <h1>Competency for High Intensity Support Activity</h1>
+        <div class="meta">Module ONE &nbsp;·&nbsp; <strong>Version V2.0</strong> &nbsp;·&nbsp; Apr. 2026</div>
+        <div class="meta" style="margin-top:8px">
+          Staff: <strong>${staff === 'Unnamed' ? '—' : staff.replace(/_/g,' ')}</strong>
+          &nbsp;·&nbsp; Date: <strong>${date}</strong>
+        </div>
+      `;
+
+      const inner = document.createElement('div');
+      inner.style.cssText = 'padding: 0 12mm 14mm 12mm;';
+      inner.appendChild(cover);
+      inner.appendChild(clone);
+      wrapper.appendChild(inner);
+
+      document.body.appendChild(wrapper);
+
+      const filename = `Competency_${staff}_${date}.pdf`;
+
+      await html2pdf().set({
+        margin: [8, 0, 10, 0],
+        filename: filename,
+        image: { type: 'jpeg', quality: 0.95 },
+        html2canvas: { scale: 2, useCORS: true, letterRendering: true, backgroundColor: '#ffffff' },
+        jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
+        pagebreak: { mode: ['css', 'legacy'] }
+      }).from(wrapper).save();
+
+      document.body.removeChild(wrapper);
+    } catch (err) {
+      console.error(err);
+      alert('Sorry, PDF generation failed: ' + err.message);
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = oldLabel; }
+    }
+  }
+
+  // ===== ② Email Form (mailto:) =====
+  function emailForm() {
+    // Ask once for the recipient; remember per browser
+    let to = localStorage.getItem('odc_email_to') || '';
+    to = prompt('Send to which email address?\n(Leave blank to fill in manually)', to) || '';
+    if (to !== null) localStorage.setItem('odc_email_to', to);
+
+    const staff = getStaffName();
+    const date = todayISO();
+    const subject = `Competency Form (V2.0) — ${staff} — ${date}`;
+
+    // Build a short text summary of completed sections
+    let body = `One Dream Community — Competency for High Intensity Support Activity\n`;
+    body += `Version V2.0 (Apr. 2026)\n`;
+    body += `Submitted: ${date}\n`;
+    body += `Staff: ${staff}\n\n`;
+    body += `--- Completed Sections ---\n`;
+
+    const sections = document.querySelectorAll('.competency-section:not(.hidden)');
+    if (sections.length === 0) {
+      body += '(No sections selected)\n';
+    } else {
+      sections.forEach((sec, i) => {
+        const title = (sec.querySelector('h2, h3, .section-title, .spb-title')?.textContent || `Section ${i+1}`).trim();
+        body += `\n• ${title}\n`;
+      });
+    }
+
+    body += `\n--- IMPORTANT ---\n`;
+    body += `Please attach the PDF you downloaded ("Download PDF" button) to this email before sending.\n`;
+    body += `mailto: cannot attach files automatically.\n`;
+
+    const url = `mailto:${encodeURIComponent(to)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+    // mailto URLs over ~2000 chars get truncated by some clients — we keep ours short
+    window.location.href = url;
   }
 
   // ===== Signature value helpers =====
